@@ -173,21 +173,29 @@ async def upload_assets(
     return {"created": results}
 
 
-@app.get("/api/assets")
-def list_assets(
+def asset_query(
     q: str = "",
     media_type: Optional[str] = None,
-    tag: Optional[str] = None,
-    collection_id: Optional[int] = None,
+    tags: list[str] = Query(default=[]),
+    exclude_tags: list[str] = Query(default=[]),
+    collection_id: Optional[int] = Query(None, ge=1),
     status: str = "active",
     sort: str = "newest",
+) -> dict:
+    """The filter and sort parameters shared by the asset list and the CSV export."""
+    return {"q": q, "media_type": media_type, "tags": tags, "exclude_tags": exclude_tags,
+            "collection_id": collection_id, "status": status, "sort": sort}
+
+
+@app.get("/api/assets")
+def list_assets(
+    filters: dict = Depends(asset_query),
     mode: str = "keyword",
-    limit: int = Query(60, le=200),
-    offset: int = 0,
+    limit: int = Query(60, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     user: dict = Depends(require_user),
 ):
-    return search.search(q=q, media_type=media_type, tag=tag, collection_id=collection_id,
-                         status=status, sort=sort, mode=mode, limit=limit, offset=offset)
+    return search.search(**filters, mode=mode, limit=limit, offset=offset)
 
 
 def _get_asset_or_404(uuid: str) -> dict:
