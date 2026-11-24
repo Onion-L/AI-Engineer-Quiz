@@ -139,6 +139,53 @@ def search(
     }
 
 
+# An asset's tags go into one CSV field, sorted and joined with ";" so they
+# do not collide with the CSV delimiter.
+CSV_COLUMNS = ("uuid", "title", "description", "filename", "media_type", "tags", "created_at")
+
+
+def export_rows(
+    *,
+    q: str = "",
+    media_type: Optional[str] = None,
+    tags: Sequence[str] = (),
+    exclude_tags: Sequence[str] = (),
+    collection_id: Optional[int] = None,
+    status: str = "active",
+    sort: str = "newest",
+) -> list[tuple]:
+    """Every matching asset in the list's order, as rows for ``CSV_COLUMNS``."""
+    conn = get_conn()
+    join, where_sql, params = build_query(
+        q=q, media_type=media_type, tags=tags, exclude_tags=exclude_tags,
+        collection_id=collection_id, status=status,
+    )
+    rows = conn.execute(
+        f"""SELECT a.id, a.uuid, a.title, a.description, a.filename, a.media_type, a.created_at
+            FROM assets a{join} WHERE {where_sql}
+            ORDER BY {SORTS.get(sort, SORTS["newest"])}""",
+        params,
+    ).fetchall()
+
+    names: dict[int, list[str]] = {}
+    ids = [r["id"] for r in rows]
+    # Chunked to stay under SQLite's bound-parameter limit on large exports.
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        for t in conn.execute(
+            "SELECT at.asset_id, t.name FROM asset_tags at JOIN tags t ON t.id = at.tag_id "
+            f"WHERE at.asset_id IN ({', '.join('?' * len(chunk))}) ORDER BY t.name",
+            chunk,
+        ):
+            names.setdefault(t["asset_id"], []).append(t["name"])
+
+    return [
+        (r["uuid"], r["title"], r["description"], r["filename"], r["media_type"],
+         ";".join(names.get(r["id"], [])), r["created_at"])
+        for r in rows
+    ]
+
+
 def _semantic_search(q, media_type, status, limit, offset) -> dict:
     conn = get_conn()
     qvec = ai.embed(q)

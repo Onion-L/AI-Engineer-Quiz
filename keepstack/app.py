@@ -6,9 +6,11 @@ single-page web client is served from the ``web/`` directory at the root.
 """
 from __future__ import annotations
 
+import csv
 import io
 import ipaddress
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -196,6 +198,21 @@ def list_assets(
     user: dict = Depends(require_user),
 ):
     return search.search(**filters, mode=mode, limit=limit, offset=offset)
+
+
+# Declared before /api/assets/{uuid}, which would otherwise claim this path.
+@app.get("/api/assets/export.csv")
+def export_assets_csv(filters: dict = Depends(asset_query), user: dict = Depends(require_user)):
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(search.CSV_COLUMNS)
+    writer.writerows(search.export_rows(**filters))
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return Response(
+        content=out.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="assets_{stamp}.csv"'},
+    )
 
 
 def _get_asset_or_404(uuid: str) -> dict:
