@@ -1,5 +1,8 @@
 """Run Keepstack: ``python -m keepstack`` (optionally ``... seed`` first).
 
+``python -m keepstack seed`` loads the demo catalog. ``... seed search`` loads
+the catalog made for the search and export scenario instead.
+
 Environment:
   KEEPSTACK_HOST (default 0.0.0.0)   KEEPSTACK_PORT (default 8000)
 """
@@ -14,8 +17,15 @@ import uvicorn
 
 def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "seed":
-        from .seed import run_seed
-        run_seed()
+        dataset = sys.argv[2] if len(sys.argv) > 2 else "demo"
+        if dataset == "search":
+            from .seed_search import run as run_search_seed
+            run_search_seed()
+        elif dataset == "demo":
+            from .seed import run_seed
+            run_seed()
+        else:
+            sys.exit(f"Unknown seed dataset {dataset!r}. Use 'demo' or 'search'.")
         return
     if len(sys.argv) > 1 and sys.argv[1] == "reindex":
         from . import vision
