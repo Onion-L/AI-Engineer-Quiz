@@ -717,5 +717,16 @@ def healthz():
 # ---------------------------------------------------------------------------
 # Static SPA (registered last so API routes win)
 # ---------------------------------------------------------------------------
+class RevalidatedStaticFiles(StaticFiles):
+    """Static files carry no freshness policy, so browsers cache them for as
+    long as they see fit and a new release can leave an old app.js running
+    behind a fresh page. Ask them to check back instead: the server answers
+    304 when nothing changed."""
+    def file_response(self, *args, **kwargs) -> Response:
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 if WEB_DIR.exists():
-    app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="web")
+    app.mount("/", RevalidatedStaticFiles(directory=str(WEB_DIR), html=True), name="web")
