@@ -2,7 +2,7 @@
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const state = { token: localStorage.getItem("keepstack_token"), user: null,
-  q: "", mode: "keyword", media: null, tag: null, sort: "newest", collection: null };
+  q: "", media: null, tags: [], excludeTags: [], sort: "newest", collection: null, page: 1 };
 
 // ---------- API helper ----------
 async function api(path, opts = {}) {
@@ -43,6 +43,8 @@ function enterApp() {
   const isAdmin = state.user.role === "admin";
   $$(".admin-only").forEach(el => el.classList.toggle("hidden", !isAdmin));
   loadLibrary();
+  loadCollections();
+  loadTagOptions();
 }
 
 // ---------- navigation ----------
@@ -59,28 +61,163 @@ $$(".nav-item").forEach(btn => btn.addEventListener("click", () => {
 }));
 
 // ---------- library / search ----------
-let searchTimer;
-$("#search").addEventListener("input", (e) => { state.q = e.target.value; clearTimeout(searchTimer); searchTimer = setTimeout(loadLibrary, 250); });
-$("#search-mode").addEventListener("change", (e) => { state.mode = e.target.value; loadLibrary(); });
-$("#sort").addEventListener("change", (e) => { state.sort = e.target.value; loadLibrary(); });
-$("#active-filter").addEventListener("click", () => { state.media = null; state.tag = null; state.collection = null; loadLibrary(); });
+const PAGE_SIZE = 24;
+let collections = [], tagOptions = [], requestId = 0, searchTimer;
+
+// The one place that turns the conditions into query parameters. The list and
+// the CSV export both go through it, so they always ask for the same assets.
+function filterParams() {
+  const p = new URLSearchParams({ q: state.q, sort: state.sort });
+  if (state.media) p.set("media_type", state.media);
+  state.tags.forEach(t => p.append("tags", t));
+  state.excludeTags.forEach(t => p.append("exclude_tags", t));
+  if (state.collection) p.set("collection_id", state.collection);
+  return p;
+}
+
+const hasFilters = () => Boolean(state.q.trim() || state.media || state.collection ||
+  state.tags.length || state.excludeTags.length);
+
+$("#search").addEventListener("input", (e) => { state.q = e.target.value; state.page = 1; clearTimeout(searchTimer); searchTimer = setTimeout(loadLibrary, 250); });
+$("#sort").addEventListener("change", (e) => { state.sort = e.target.value; state.page = 1; loadLibrary(); });
+$("#filter-collection").addEventListener("change", (e) => { state.collection = e.target.value || null; state.page = 1; loadLibrary(); });
+$("#filter-media").addEventListener("change", (e) => { state.media = e.target.value || null; state.page = 1; loadLibrary(); });
+$("#page-prev").addEventListener("click", () => { state.page--; turnPage(); });
+$("#page-next").addEventListener("click", () => { state.page++; turnPage(); });
+$("#btn-clear-filters").addEventListener("click", clearFilters);
+$("#btn-export").addEventListener("click", exportCsv);
+wireTagInput("include", "tags");
+wireTagInput("exclude", "excludeTags");
+
+function turnPage() { window.scrollTo(0, 0); loadLibrary(); }
+
+function clearFilters() {
+  Object.assign(state, { q: "", media: null, tags: [], excludeTags: [], collection: null, page: 1 });
+  $("#search").value = "";
+  $("#filter-collection").value = "";
+  $("#filter-media").value = "";
+  renderTagChips();
+  loadLibrary();
+}
+
+// Enter takes whatever was typed. Leaving the field only takes a tag picked
+// from the suggestions, so a half-typed word is not turned into a condition.
+function wireTagInput(prefix, listName) {
+  const input = $("#" + prefix + "-input");
+  const add = () => {
+    const name = input.value.trim().toLowerCase();
+    input.value = "";
+    if (!name || state[listName].includes(name)) return;
+    state[listName].push(name);
+    state.page = 1;
+    renderTagChips();
+    loadLibrary();
+  };
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); add(); } });
+  input.addEventListener("change", () => { if (tagOptions.includes(input.value.trim().toLowerCase())) add(); });
+}
+
+function removeTag(listName, name) {
+  state[listName] = state[listName].filter(t => t !== name);
+  state.page = 1;
+  renderTagChips();
+}
+
+function renderTagChips() {
+  const draw = (names, el, listName) => {
+    el.innerHTML = names.map(t => `<button class="chip" data-tag="${esc(t)}" title="Remove">${esc(t)}</button>`).join("");
+    $$(".chip", el).forEach(b => b.addEventListener("click", () => { removeTag(listName, b.dataset.tag); loadLibrary(); }));
+  };
+  draw(state.tags, $("#include-chips"), "tags");
+  draw(state.excludeTags, $("#exclude-chips"), "excludeTags");
+}
 
 async function loadLibrary() {
-  const p = new URLSearchParams({ q: state.q, sort: state.sort, mode: state.mode, limit: "120" });
-  if (state.media) p.set("media_type", state.media);
-  if (state.tag) p.set("tag", state.tag);
-  if (state.collection) p.set("collection_id", state.collection);
-  const data = await api("/api/assets?" + p.toString());
+  // Each answer carries the number of its request. When conditions change
+  // quickly, only the answer to the latest one is shown.
+  const id = ++requestId;
+  $("#load-error").classList.add("hidden");
+  $("#page-info").textContent = "Loading…";
+  $("#grid").classList.add("loading");
+  try {
+    const p = filterParams();
+    p.set("limit", PAGE_SIZE);
+    p.set("offset", (state.page - 1) * PAGE_SIZE);
+    const data = await api("/api/assets?" + p.toString());
+    if (id !== requestId) return;
+    const pages = Math.max(1, Math.ceil(data.total / PAGE_SIZE));
+    // The page went away, after an edit or a delete: fall back to the last one.
+    if (state.page > pages) { state.page = pages; return loadLibrary(); }
+    renderLibrary(data, pages);
+  } catch {
+    if (id !== requestId || !state.user) return;
+    $("#grid").classList.remove("loading");
+    $("#page-info").textContent = "";
+    $("#load-error").innerHTML = 'Could not load assets. <button class="btn" id="btn-retry">Retry</button>';
+    $("#load-error").classList.remove("hidden");
+    $("#btn-retry").addEventListener("click", loadLibrary);
+  }
+}
+
+function renderLibrary(data, pages) {
+  $("#grid").classList.remove("loading");
   renderFacets(data.facets);
   renderGrid(data.items, data.total);
-  const filt = state.media || (state.tag ? "#" + state.tag : null) || (state.collection ? "collection" : null);
-  $("#active-filter").classList.toggle("hidden", !filt);
-  if (filt) $("#active-filter").textContent = filt;
+  renderActiveFilters();
+  $("#pager").classList.toggle("hidden", data.total === 0);
+  $("#page-info").textContent = `Page ${state.page} of ${pages} · ${data.total} ${data.total === 1 ? "asset" : "assets"}`;
+  $("#page-prev").disabled = state.page <= 1;
+  $("#page-next").disabled = state.page >= pages;
+}
+
+// Every condition in force, each one removable, so the result can be read
+// and undone.
+function renderActiveFilters() {
+  const collection = collections.find(c => String(c.id) === String(state.collection));
+  const chips = [];
+  if (state.q.trim()) chips.push([`“${state.q.trim()}”`, () => { state.q = ""; $("#search").value = ""; }]);
+  if (collection) chips.push([collection.name, () => { state.collection = null; $("#filter-collection").value = ""; }]);
+  state.tags.forEach(t => chips.push([`has #${t}`, () => removeTag("tags", t)]));
+  state.excludeTags.forEach(t => chips.push([`not #${t}`, () => removeTag("excludeTags", t)]));
+  if (state.media) chips.push([state.media, () => { state.media = null; $("#filter-media").value = ""; }]);
+  $("#active-conditions").innerHTML = chips.map(([label], i) =>
+    `<button class="chip" data-i="${i}" title="Remove">${esc(label)}</button>`).join("");
+  $$("#active-conditions .chip").forEach(b => b.addEventListener("click", () => {
+    chips[+b.dataset.i][1]();
+    state.page = 1;
+    loadLibrary();
+  }));
+  $("#active-filters").classList.toggle("hidden", !chips.length);
+}
+
+// The token travels in the Authorization header, which a plain link cannot
+// send, so the file is fetched first and saved from memory afterwards.
+async function exportCsv() {
+  const btn = $("#btn-export");
+  btn.disabled = true;
+  try {
+    const res = await api("/api/assets/export.csv?" + filterParams().toString());
+    const filename = (res.headers.get("content-disposition") || "").match(/filename="([^"]+)"/)?.[1] || "assets.csv";
+    const url = URL.createObjectURL(await res.blob());
+    const link = Object.assign(document.createElement("a"), { href: url, download: filename });
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast("Exported " + filename);
+  } catch { toast("Export failed. Please try again.", "err"); }
+  finally { btn.disabled = false; }
 }
 
 function renderGrid(items, total) {
-  $("#result-title").textContent = state.q ? `Results (${total})` : `Library (${total})`;
-  $("#empty").classList.toggle("hidden", items.length > 0);
+  $("#result-title").textContent = `${hasFilters() ? "Results" : "Library"} (${total})`;
+  const empty = $("#empty");
+  if (items.length) empty.classList.add("hidden");
+  else {
+    empty.classList.remove("hidden");
+    empty.innerHTML = hasFilters()
+      ? 'No assets match these conditions.<div><button class="btn" id="btn-empty-clear">Clear filters</button></div>'
+      : "No assets yet. Click Upload to get started.";
+    $("#btn-empty-clear")?.addEventListener("click", clearFilters);
+  }
   $("#grid").innerHTML = items.map(a => `
     <div class="card" data-uuid="${a.uuid}">
       <img class="thumb" loading="lazy" src="/api/assets/${a.uuid}/thumb" alt="${esc(a.alt_text || a.title)}">
@@ -94,11 +231,30 @@ function renderGrid(items, total) {
 
 function renderFacets(facets) {
   $("#facet-media").innerHTML = (facets.media_types || []).map(m =>
-    `<li class="${state.media===m.value?'active':''}" data-media="${m.value}"><span>${m.value}</span><span class="count">${m.count}</span></li>`).join("");
+    `<li class="${state.media===m.value?'active':''}" data-media="${esc(m.value)}"><span>${esc(m.value)}</span><span class="count">${m.count}</span></li>`).join("");
+  // The sidebar hides on narrow screens, so the filter bar carries the same choice.
+  const media = $("#filter-media");
+  media.innerHTML = '<option value="">All media types</option>' + (facets.media_types || []).map(m =>
+    `<option value="${esc(m.value)}">${esc(m.value)}</option>`).join("");
+  media.value = state.media || "";
+  // A shortcut for the tag filter: clicking a tag here adds it to "has all",
+  // or takes it back out when it is already there.
   $("#facet-tags").innerHTML = (facets.tags || []).slice(0, 18).map(t =>
-    `<li class="${state.tag===t.value?'active':''}" data-tag="${esc(t.value)}"><span>${esc(t.value)}</span><span class="count">${t.count}</span></li>`).join("");
-  $$("#facet-media li").forEach(li => li.addEventListener("click", () => { state.media = state.media===li.dataset.media?null:li.dataset.media; loadLibrary(); }));
-  $$("#facet-tags li").forEach(li => li.addEventListener("click", () => { state.tag = state.tag===li.dataset.tag?null:li.dataset.tag; loadLibrary(); }));
+    `<li class="${state.tags.includes(t.value)?'active':''}" data-tag="${esc(t.value)}"><span>${esc(t.value)}</span><span class="count">${t.count}</span></li>`).join("");
+  $$("#facet-media li").forEach(li => li.addEventListener("click", () => {
+    state.media = state.media === li.dataset.media ? null : li.dataset.media;
+    state.page = 1; loadLibrary();
+  }));
+  $$("#facet-tags li").forEach(li => li.addEventListener("click", () => {
+    if (state.tags.includes(li.dataset.tag)) removeTag("tags", li.dataset.tag);
+    else { state.tags.push(li.dataset.tag); state.page = 1; renderTagChips(); }
+    loadLibrary();
+  }));
+}
+
+async function loadTagOptions() {
+  tagOptions = (await api("/api/tags")).tags.map(t => t.name);
+  $("#tag-options").innerHTML = tagOptions.map(t => `<option value="${esc(t)}">`).join("");
 }
 
 // ---------- asset detail drawer ----------
@@ -175,12 +331,12 @@ async function openAsset(uuid) {
     $("#tag-add")?.addEventListener("keydown", async (e) => {
       if (e.key === "Enter" && e.target.value.trim()) {
         await api("/api/assets/"+uuid+"/tags", { json: { name: e.target.value.trim() } });
-        openAsset(uuid);
+        openAsset(uuid); loadLibrary(); loadTagOptions();
       }
     });
     $$("#tag-row .rm").forEach(rm => rm.addEventListener("click", async () => {
       await api("/api/assets/"+uuid+"/tags/"+encodeURIComponent(rm.dataset.tag), { method: "DELETE" });
-      openAsset(uuid);
+      openAsset(uuid); loadLibrary();
     }));
     $("#d-share")?.addEventListener("click", async () => {
       const r = await api("/api/shares", { json: { target_type: "asset", target_id: a.id, permission: "download" } });
@@ -226,11 +382,20 @@ async function uploadFiles(files) {
 // ---------- collections ----------
 async function loadCollections() {
   const data = await api("/api/collections");
+  collections = data.collections;
+  // The same list fills the collection filter in the library view.
+  const select = $("#filter-collection");
+  select.innerHTML = '<option value="">All collections</option>' + collections.map(c =>
+    `<option value="${c.id}">${esc(c.name)}</option>`).join("");
+  if (!collections.some(c => String(c.id) === String(state.collection))) state.collection = null;
+  select.value = state.collection || "";
   $("#collection-list").innerHTML = data.collections.map(c =>
     `<div class="collection-card" data-id="${c.id}"><span class="n">${esc(c.name)}</span><span class="muted">${c.asset_count} assets</span><span class="muted">${esc(c.description||"")}</span></div>`).join("")
     || '<p class="muted">No collections yet.</p>';
   $$("#collection-list .collection-card").forEach(card => card.addEventListener("click", () => {
-    state.collection = card.dataset.id; state.media = null; state.tag = null;
+    // Opening a collection starts from its whole content.
+    Object.assign(state, { collection: card.dataset.id, media: null, tags: [], excludeTags: [], page: 1 });
+    renderTagChips();
     $$(".nav-item").forEach(b => b.classList.remove("active"));
     $('.nav-item[data-view="library"]').classList.add("active");
     $$(".view").forEach(v => v.classList.add("hidden")); $("#view-library").classList.remove("hidden");
