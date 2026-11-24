@@ -408,3 +408,26 @@ def test_export_keeps_tags_past_the_first_batch(client):
 
 def test_the_export_requires_login():
     assert TestClient(app).get(EXPORT).status_code == 401
+
+
+def test_filters_never_return_deleted_assets(client):
+    # Whatever status is asked for, only active assets come back.
+    col = _collection("Soft deleted")
+    live = _asset("harbor kept", tags=["approved"], collection=col)
+    _asset("harbor gone", tags=["approved"], collection=col, status="deleted")
+    for asked in ("deleted", "anything", "ACTIVE"):
+        assert client.get("/api/assets", params={"status": asked}).status_code == 422
+        assert client.get(EXPORT, params={"status": asked}).status_code == 422
+    assert _uuids(client, collection_id=col) == [live]
+    assert [r[0] for r in _csv(client, collection_id=col)[1:]] == [live]
+
+    # A viewer, the role with the least access, gets the same answers.
+    assert client.post("/api/users", json={"username": "reader", "password": "reader-pass",
+                                            "role": "viewer"}).status_code == 200
+    viewer = TestClient(app)
+    token = viewer.post("/api/auth/login",
+                        json={"username": "reader", "password": "reader-pass"}).json()["token"]
+    viewer.headers["Authorization"] = f"Bearer {token}"
+    assert viewer.get("/api/assets", params={"status": "deleted"}).status_code == 422
+    assert viewer.get(EXPORT, params={"status": "deleted"}).status_code == 422
+    assert [r[0] for r in _csv(viewer, collection_id=col)[1:]] == [live]

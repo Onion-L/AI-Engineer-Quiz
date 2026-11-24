@@ -12,7 +12,7 @@ import ipaddress
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import (Body, Depends, FastAPI, File, Form, HTTPException, Query,
                      Request, UploadFile)
@@ -181,7 +181,9 @@ def asset_query(
     tags: list[str] = Query(default=[]),
     exclude_tags: list[str] = Query(default=[]),
     collection_id: Optional[int] = Query(None, ge=1),
-    status: str = "active",
+    # Filters return active assets only. Anything else is a client error, not a
+    # way to read deleted records.
+    status: Literal["active"] = "active",
     sort: str = "newest",
 ) -> dict:
     """The filter and sort parameters shared by the asset list and the CSV export."""
