@@ -395,6 +395,8 @@ async function loadCollections() {
   $$("#collection-list .collection-card").forEach(card => card.addEventListener("click", () => {
     // Opening a collection starts from its whole content.
     Object.assign(state, { collection: card.dataset.id, media: null, tags: [], excludeTags: [], page: 1 });
+    $("#filter-collection").value = state.collection;
+    $("#filter-media").value = "";
     renderTagChips();
     $$(".nav-item").forEach(b => b.classList.remove("active"));
     $('.nav-item[data-view="library"]').classList.add("active");
