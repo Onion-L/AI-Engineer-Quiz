@@ -393,8 +393,10 @@ async function loadCollections() {
     `<div class="collection-card" data-id="${c.id}"><span class="n">${esc(c.name)}</span><span class="muted">${c.asset_count} assets</span><span class="muted">${esc(c.description||"")}</span></div>`).join("")
     || '<p class="muted">No collections yet.</p>';
   $$("#collection-list .collection-card").forEach(card => card.addEventListener("click", () => {
-    // Opening a collection starts from its whole content.
-    Object.assign(state, { collection: card.dataset.id, media: null, tags: [], excludeTags: [], page: 1 });
+    // Opening a collection starts from its whole content, so the keyword and
+    // the other conditions are cleared as well.
+    Object.assign(state, { q: "", collection: card.dataset.id, media: null, tags: [], excludeTags: [], page: 1 });
+    $("#search").value = "";
     $("#filter-collection").value = state.collection;
     $("#filter-media").value = "";
     renderTagChips();
